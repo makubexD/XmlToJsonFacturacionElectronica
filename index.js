@@ -258,7 +258,8 @@ const processPdfFile = async (filePath, tokenManager) => {
     const inquilinoRegex = /(?:^|\n)Inquilino:\s*([^\n]+)/g;
     const montoAlquilerRegex = /Monto de Alquiler:\s*S\/\s*([\d,]+.\d+)/g;
     const tributoResultanteRegex = /Tributo Resultante:\s*S\/\s*([\d,]+.\d+)/g;
-    const fechaPagoRegex = /Fecha de Pago:\s*([^\n]+)/g;
+    // const fechaPagoRegex = /Fecha de Pago:\s*([^\n]+)/g;
+    const fechaPagoRegex = /Fecha de Pago:\s*(\d{2}\/\d{2}\/\d{4})/g;;
 
     const rucMatch = rucRegex.exec(text);
     const inquilinoMatch = inquilinoRegex.exec(text);
