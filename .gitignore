@@ -130,6 +130,6 @@ dist
 .pnp.*
 
 
-.xml
-.xlsx
-.pdf
+*.xml
+*.xlsx
+*.pdf
