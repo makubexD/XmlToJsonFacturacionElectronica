@@ -2,17 +2,62 @@ const fs = require('fs');
 const path = require('path');
 const xml2js = require('xml2js');
 const xlsx = require('xlsx');
+const pdf = require('pdf-parse');
+const axios = require('axios');
 
-const xmlFolder = './XmlFiles'; // Folder containing XML files
+// Generic directory containing both XML and PDF files
+const genericFolder = './Files'; // Modify this path as needed
 const outputExcelFile = './output.xlsx'; // Output Excel file
 
-// Equivalence dictionary for element names
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Equivalence dictionary for XML element names
 const equivalenceDict = {
   'cbc:ID': ['cbc:ID', 'cbc:CompanyID', 'cbc:maku', 'cbc:demo'],
   'cbc:Description': ['cbc:Description'],
   'cbc:IssueDate': ['cbc:IssueDate'],
   'cbc:DocumentCurrencyCode': ['cbc:DocumentCurrencyCode']
 };
+
+class TokenManager {
+  constructor(tokens) {
+    this.tokens = tokens;
+    this.currentIndex = 0;
+  }
+
+  getNextToken() {
+    const token = this.tokens[this.currentIndex];
+    this.currentIndex = (this.currentIndex + 1) % this.tokens.length;
+    return token;
+  }
+}
+
+class InvoiceData {
+  constructor(type, filePath) {
+    this.type = type;
+    this.filePath = filePath;
+    this.invoiceNumber = 'N/A';
+    this.description = 'N/A';
+    this.rucEmi = 'N/A';
+    this.amountNoTax = 'N/A';
+    this.currencyCode = 'N/A';
+    this.issueDate = 'N/A';
+    this.razonSocial = 'N/A';
+    this.inquilino = 'N/A';
+    this.montoAlquiler = 'N/A';
+    this.tributoResultante = 'N/A';
+    this.fechaPago = 'N/A';
+    this.StackError = '';
+  }
+
+  addError(error) {
+    this.StackError += `${error.message} in ${this.filePath} `;
+  }
+
+  populateData(data) {
+    Object.assign(this, data);
+  }
+}
 
 // Function to convert XML to JSON
 const convertXmlToJson = (xml) => {
@@ -27,7 +72,7 @@ const convertXmlToJson = (xml) => {
   });
 };
 
-// Function to find the value of a key based on equivalence dictionary
+// Function to find the value of a key based on the equivalence dictionary
 const findValue = (obj, keys) => {
   for (const key of keys) {
     if (obj[key]) {
@@ -37,48 +82,78 @@ const findValue = (obj, keys) => {
   return 'Not found';
 };
 
-// Function to extract specific values from the JSON data
-const extractValues = (jsonData) => {
+const processXmlFile = async (filePath, tokenManager) => {
+  const fileName = path.basename(filePath);
+  const invoiceData = new InvoiceData('XML', fileName);
+
+  try {
+    const xmlData = fs.readFileSync(filePath, 'utf8');
+    const jsonData = await convertXmlToJson(xmlData);
+    const values = extractValues(jsonData, invoiceData);  // Pass invoiceData for error handling
+
+    if (values.rucEmi && values.rucEmi.length == 11){
+      const apiResponse = await apiRequest(values.rucEmi, tokenManager);
+      values.razonSocial = apiResponse.razonSocial;
+    }   
+
+    invoiceData.populateData(values);  // Populate data if no error
+    console.log(`Processed XML file: ${fileName}`);
+  } catch (error) {
+    invoiceData.addError(error);  // Error handling here
+    console.error(`Error processing XML file ${filePath}:`, error);
+  }
+
+  return invoiceData;
+};
+
+const extractValues = (jsonData, invoiceData) => {
   try {
     const identifier = Object.keys(jsonData)[0];
-    let jsonResponse = {};
+    let values = {};
 
     switch (identifier) {
       case 'Invoice':
-        jsonResponse = evaluateDocumentJson(jsonData['Invoice'], 'InvoiceLine');
+        values = evaluateInvoiceJson(jsonData);
         break;
       case 'ar:ApplicationResponse':
-        jsonResponse = evaluateApplicationResponseJson(jsonData['ar:ApplicationResponse']);
+        values = evaluateApplicationResponseJson(jsonData);
         break;
       case 'DebitNote':
-        jsonResponse = evaluateDocumentJson(jsonData['DebitNote'], 'DebitNoteLine');
+        values = evaluateDebitNoteJson(jsonData);
         break;
       default:
-        console.log('Unknown JSON type:', identifier);
-    }
+        throw new Error(`Unknown JSON identifier: ${identifier}`);
+    }    
 
-    return jsonResponse;
-
+    return values;
   } catch (error) {
+    invoiceData.addError(error);  // Handle error properly in the calling function
     console.error('Error extracting values:', error);
-    return {
-      invoiceNumber: 'Error',
-      description: 'Error',
-      rucEmi: 'Error',
-      amountNoTax: 'Error',
-      currencyCode: 'Error',
-      issueDate: 'Error'
-    };
+    return {};  // Return an empty object in case of error
   }
 };
 
-const evaluateDocumentJson = (documentJson, lineItemKey) => {
-  const invoiceNumber = findValue(documentJson, equivalenceDict['cbc:ID']);
-  const description = getDescription(documentJson, lineItemKey);
-  const rucEmi = findValue(documentJson['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification'], equivalenceDict['cbc:ID']);
-  const amountNoTax = findValue(documentJson['cac:TaxTotal']?.['cac:TaxSubtotal'], ['cbc:TaxableAmount']);
-  const currencyCode = findValue(documentJson, equivalenceDict['cbc:DocumentCurrencyCode']);
-  const issueDate = findValue(documentJson, equivalenceDict['cbc:IssueDate']);
+
+
+function evaluateInvoiceJson(invoiceJson) {
+  let invoiceJsonReader = invoiceJson['Invoice'];
+
+  let invoiceNumber = invoiceJsonReader?.['cbc:ID'];
+  let description = '';
+
+  if (Array.isArray(invoiceJsonReader?.['cac:InvoiceLine'])) {
+    description = invoiceJsonReader?.['cac:InvoiceLine'].map(invoiceLine => {
+      const description = invoiceLine['cac:Item']['cbc:Description'];
+      return Array.isArray(description) ? description.join(' ') : description;
+    }).join(' ');
+  } else {
+    description = invoiceJsonReader?.['cac:InvoiceLine']?.['cac:Item']?.['cbc:Description'];
+  }
+
+  let rucEmi = invoiceJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
+  let amountNoTax = invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
+  let currencyCode = invoiceJsonReader['cbc:DocumentCurrencyCode']?.['_'] || invoiceJsonReader['cbc:DocumentCurrencyCode'] || '';
+  let issueDate = findValue(invoiceJsonReader, equivalenceDict['cbc:IssueDate']);
 
   return {
     invoiceNumber,
@@ -86,326 +161,185 @@ const evaluateDocumentJson = (documentJson, lineItemKey) => {
     rucEmi,
     amountNoTax,
     currencyCode,
-    issueDate
+    issueDate,
+    StackError: ''
   };
-};
+}
 
-const getDescription = (documentJson, lineItemKey) => {
-  const lineItems = documentJson[`cac:${lineItemKey}`];
-  if (Array.isArray(lineItems)) {
-    return lineItems.map(lineItem => {
-      const desc = lineItem['cac:Item']['cbc:Description'];
-      return Array.isArray(desc) ? desc.join(' ') : desc;
-    }).join(' ');
-  } else {
-    const desc = lineItems?.['cac:Item']?.['cbc:Description'];
-    return Array.isArray(desc) ? desc.join(' ') : desc;
-  }
-};
+function evaluateApplicationResponseJson(appRespJson) {
+  let appRespJsonReader = appRespJson['ar:ApplicationResponse'];
 
-const evaluateApplicationResponseJson = (appRespJson) => {
-  const invoiceNumber = findValue(appRespJson['cac:DocumentResponse']?.['cac:DocumentReference'], equivalenceDict['cbc:ID']);
-  const description = findValue(appRespJson['cac:DocumentResponse']?.['cac:Response'], equivalenceDict['cbc:Description']);
-  const currencyCode = findValue(appRespJson, equivalenceDict['cbc:DocumentCurrencyCode']);
-  const issueDate = findValue(appRespJson, equivalenceDict['cbc:IssueDate']);
+  let invoiceNumber = findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:DocumentReference'], equivalenceDict['cbc:ID']);
+  let description = findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:Response'], equivalenceDict['cbc:Description']);
+  let rucEmi = 'TBD';
+  let amountNoTax = 'TBD';
+  let currencyCode = findValue(appRespJsonReader, equivalenceDict['cbc:DocumentCurrencyCode']);
+  let issueDate = findValue(appRespJsonReader, equivalenceDict['cbc:IssueDate']);
 
   return {
     invoiceNumber,
     description,
-    rucEmi: 'TBD',
-    amountNoTax: 'TBD',
+    rucEmi,
+    amountNoTax,
     currencyCode,
-    issueDate
+    issueDate,
+    StackError: ''
   };
+}
+
+function evaluateDebitNoteJson(debitNoteJson) {
+  let debitNoteJsonReader = debitNoteJson['DebitNote'];
+
+  let invoiceNumber = debitNoteJsonReader?.['cbc:ID'];
+  let description = '';
+
+  if (Array.isArray(debitNoteJsonReader?.['cac:DebitNoteLine'])) {
+    description = debitNoteJsonReader?.['cac:DebitNoteLine'].map(invoiceLine => {
+      const description = invoiceLine['cac:Item']['cbc:Description'];
+      return Array.isArray(description) ? description.join(' ') : description;
+    }).join(' ');
+  } else {
+    description = debitNoteJsonReader?.['cac:DebitNoteLine']?.['cac:Item']?.['cbc:Description'];
+  }
+
+  let rucEmi = debitNoteJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
+  let amountNoTax = debitNoteJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
+  let currencyCode = debitNoteJsonReader['cbc:DocumentCurrencyCode']?.['_'] || debitNoteJsonReader['cbc:DocumentCurrencyCode'] || '';
+  let issueDate = findValue(debitNoteJsonReader, equivalenceDict['cbc:IssueDate']);
+
+  return {
+    invoiceNumber,
+    description,
+    rucEmi,
+    amountNoTax,
+    currencyCode,
+    issueDate,
+    StackError: ''
+  };
+}
+
+
+const apiRequest = async (ruc, tokenManager) => {
+  const token = tokenManager.getNextToken();
+  try {
+    const response = await axios({
+      method: 'get',
+      maxBodyLength: Infinity,
+      url: `https://api.apis.net.pe/v2/sunat/ruc/full?numero=${ruc}`, 
+      headers: {
+        'Authorization': token
+      }
+    });
+    // console.log(token);
+    
+    return response.data;
+  } catch (err) {
+    if (err.response && err.response.status === 429) {
+      console.error('Rate limit hit (429), retrying after delay...');
+      await delay(1000); // Delay before retrying
+      return apiRequest(ruc, tokenManager); // Retry after delay
+    }
+    throw err; // Re-throw error if it's not a rate limit issue
+  }
 };
 
-// Function to read and convert all XML files in the folder, then write to Excel
-const processXmlFiles = async () => {
-  const workbook = xlsx.utils.book_new();
-  const worksheetData = [['File', 'Invoice', 'Description', 'Ruc Emisor', 'Amount no tax', 'Currency Code', 'Issue Date']];
+
+const processPdfFile = async (filePath, tokenManager) => {
+  const fileName = path.basename(filePath);
+  const invoiceData = new InvoiceData('PDF', fileName);
 
   try {
-    const files = fs.readdirSync(xmlFolder);
+    const dataBuffer = fs.readFileSync(filePath);
+    const data = await pdf(dataBuffer);
+    const text = data.text;
+
+    // Regexes to extract data from PDF
+    const rucRegex = /RUC:\s*([\d\s\n]{1,12})/g;
+    const inquilinoRegex = /(?:^|\n)Inquilino:\s*([^\n]+)/g;
+    const montoAlquilerRegex = /Monto de Alquiler:\s*S\/\s*([\d,]+.\d+)/g;
+    const tributoResultanteRegex = /Tributo Resultante:\s*S\/\s*([\d,]+.\d+)/g;
+    const fechaPagoRegex = /Fecha de Pago:\s*([^\n]+)/g;
+
+    const rucMatch = rucRegex.exec(text);
+    const inquilinoMatch = inquilinoRegex.exec(text);
+    const montoAlquilerMatch = montoAlquilerRegex.exec(text);
+    const tributoResultanteMatch = tributoResultanteRegex.exec(text);
+    const fechaPagoMatch = fechaPagoRegex.exec(text);
+
+    if (rucMatch) {
+      const ruc = rucMatch[1].replace(/\s+/g, '').trim();
+      if (ruc.length === 11) {
+        const apiResponse = await apiRequest(ruc, tokenManager);
+        invoiceData.populateData({
+          rucEmi: ruc,
+          razonSocial: apiResponse.razonSocial,
+          inquilino: inquilinoMatch ? inquilinoMatch[1] : 'N/A',
+          montoAlquiler: montoAlquilerMatch ? montoAlquilerMatch[1] : 'N/A',
+          tributoResultante: tributoResultanteMatch ? tributoResultanteMatch[1] : 'N/A',
+          fechaPago: fechaPagoMatch ? fechaPagoMatch[1] : 'N/A'
+        });
+      } else {
+        invoiceData.addError(new Error(`Invalid RUC format in ${fileName}`));
+      }
+    } else {
+      invoiceData.addError(new Error(`No RUC found in ${fileName}`));
+    }
+  } catch (error) {
+    invoiceData.addError(error);
+  }
+
+  return invoiceData;
+};
+
+const processAllFiles = async () => {
+  const workbook = xlsx.utils.book_new();
+  const worksheetData = [['Type', 'File', 'Invoice', 'Description', 'Ruc Emisor', 'Amount no tax', 'Currency Code', 'Issue Date', 'Razon Social', 'Inquilino', 'Monto de Alquiler', 'Tributo Resultante', 'Fecha de Pago', 'StackError']];
+
+  const tokenManager = new TokenManager([
+    ''
+  ]);
+
+  try {
+    const files = fs.readdirSync(genericFolder);
     for (const file of files) {
-      if (path.extname(file) === '.xml') {
-        const filePath = path.join(xmlFolder, file);
-        const xmlData = fs.readFileSync(filePath, 'utf8');
-        const jsonData = await convertXmlToJson(xmlData);
+      const filePath = path.join(genericFolder, file);
+      const ext = path.extname(file).toLowerCase();
+      let result;
 
-        const values = extractValues(jsonData);
-        // console.log(values);
-        
-        worksheetData.push([file, values.invoiceNumber, values.description, values.rucEmi, values.amountNoTax, values.currencyCode, values.issueDate]);
+      if (ext === '.xml') {
+        result = await processXmlFile(filePath, tokenManager);
+      } else if (ext === '.pdf') {
+        result = await processPdfFile(filePath, tokenManager);
+      }
 
-        console.log(`Processed file: ${file}`);
+      if (result) {
+        worksheetData.push([
+          result.type,
+          result.filePath,
+          result.invoiceNumber,
+          result.description,
+          result.rucEmi,
+          result.amountNoTax,
+          result.currencyCode,
+          result.issueDate,
+          result.razonSocial,
+          result.inquilino,
+          result.montoAlquiler,
+          result.tributoResultante,
+          result.fechaPago,
+          result.StackError
+        ]);
       }
     }
 
     const worksheet = xlsx.utils.aoa_to_sheet(worksheetData);
     xlsx.utils.book_append_sheet(workbook, worksheet, 'Sheet1');
     xlsx.writeFile(workbook, outputExcelFile);
-
     console.log(`Data has been written to ${outputExcelFile}`);
   } catch (error) {
-    console.error('Error processing XML files:', error);
+    console.error('Error processing files:', error);
   }
 };
 
-// Execute the function
-processXmlFiles();
+processAllFiles();
 
-
-
-
-
-
-
-
-// const fs = require('fs');
-// const path = require('path');
-// const xml2js = require('xml2js');
-// const xlsx = require('xlsx');
-
-// const xmlFolder = './XmlFiles'; // Folder containing XML files
-// const outputExcelFile = './output.xlsx'; // Output Excel file
-
-// // Equivalence dictionary for element names
-// const equivalenceDict = {
-//   'cbc:ID': ['cbc:ID', 'cbc:CompanyID', 'cbc:maku', 'cbc:demo'],
-//   'cbc:Description': ['cbc:Description'],
-//   'cbc:IssueDate': ['cbc:IssueDate'],
-//   'cbc:DocumentCurrencyCode': ['cbc:DocumentCurrencyCode']
-// };
-
-// // Function to convert XML to JSON
-// const convertXmlToJson = (xml) => {
-//   return new Promise((resolve, reject) => {
-//     xml2js.parseString(xml, { explicitArray: false }, (err, result) => {
-//       if (err) {
-//         reject(err);
-//       } else {
-//         resolve(result);
-//       }
-//     });
-//   });
-// };
-
-// // Function to find the value of a key based on equivalence dictionary
-// const findValue = (obj, keys) => {
-//   for (const key of keys) {
-//     if (obj[key]) {
-//       return obj[key];
-//     }
-//   }
-//   return 'Not found';
-// };
-
-// // Function to extract specific values from the JSON data
-// const extractValues = (jsonData) => {
-//   try {
-//     const identifier = Object.keys(jsonData)[0] 
-//     let jsonResponse = {};
-
-//     switch (identifier) {
-//         case 'Invoice':
-//             jsonResponse = evaluateInvoiceJson(jsonData);
-//             break;
-//         case 'ar:ApplicationResponse':
-//             jsonResponse = evaluateApplicationResponseJson(jsonData);
-//             break;
-//         case 'DebitNote':
-//             jsonResponse = evaluateDebitNoteJson(jsonData);
-//             break;        
-//         default:
-//             console.log('Unknown JSON type:', {});
-//     }    
-
-//     return jsonResponse;
-
-//   } catch (error) {
-//     console.error('Error extracting values:', error);
-//     return {
-//       description: 'Error',
-//       id: 'Error',
-//       issueDate: 'Error'
-//     };
-//   }
-// };
-
-// function evaluateInvoiceJson(invoiceJson){
-//     let invoiceJsonReader = invoiceJson['Invoice'];
-
-//     // let valueToDebug = invoiceJsonReader?.['cbc:ID'];
-//     // console.log(valueToDebug);
-    
-
-//     let invoiceNumber = invoiceJsonReader?.['cbc:ID'];
-//     let description = '';
-
-//     if (Array.isArray(invoiceJsonReader?.['cac:InvoiceLine'])) {
-//         description = invoiceJsonReader?.['cac:InvoiceLine'].map(invoiceLine => {
-//             const description = invoiceLine['cac:Item']['cbc:Description'];
-//             // If description is an array, join its elements into one string
-//             if (Array.isArray(description)) {
-//                 return description.join(' ');
-//             } else {
-//                 return description;
-//             }
-//         }).join(' ');        
-//     } else {
-//         description = invoiceJsonReader?.['cac:InvoiceLine']?.['cac:Item']?.['cbc:Description'];
-//     }   
-    
-
-//     let rucEmi = invoiceJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
-//     let amountNoTax = invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];    
-//     let currencyCode = "";
-
-//     // If currency code is a direct value
-//     if (invoiceJsonReader.hasOwnProperty('DocumentCurrencyCode')) {
-//         currencyCode = invoiceJsonReader.DocumentCurrencyCode;
-//     }
-//     // If currency code is nested within an object
-//     else if (invoiceJsonReader.hasOwnProperty('cbc:DocumentCurrencyCode') && typeof invoiceJsonReader['cbc:DocumentCurrencyCode'] === 'object') {
-//         currencyCode = invoiceJsonReader['cbc:DocumentCurrencyCode']['_'];
-//     }
-//     // If currency code is nested within an object with multiple attributes
-//     else if (invoiceJsonReader.hasOwnProperty('cbc:DocumentCurrencyCode') && typeof invoiceJsonReader['cbc:DocumentCurrencyCode'] === 'string') {
-//         currencyCode = invoiceJsonReader['cbc:DocumentCurrencyCode'];
-//     }
-
-
-//     let issueDate = findValue(invoiceJsonReader, equivalenceDict['cbc:IssueDate']);
-
-//     return {
-//         invoiceNumber,
-//         description,
-//         rucEmi,
-//         amountNoTax,
-//         currencyCode,
-//         issueDate
-//       };
-// }
-
-// function evaluateApplicationResponseJson(appRespJson){
-//     let appRespJsonReader = appRespJson['ar:ApplicationResponse'];
-
-//     let invoiceNumber = findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:DocumentReference'], equivalenceDict['cbc:ID']);
-//     let description = findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:Response'], equivalenceDict['cbc:Description']);
-//     let rucEmi = 'TBD';
-//     let amountNoTax = 'TBD';
-//     let currencyCode = findValue(appRespJsonReader, equivalenceDict['cbc:DocumentCurrencyCode']);
-//     let issueDate = findValue(appRespJsonReader, equivalenceDict['cbc:IssueDate']);
-
-//     return {
-//         invoiceNumber,
-//         description,
-//         rucEmi,
-//         amountNoTax,
-//         currencyCode,
-//         issueDate
-//       };
-
-// }
-
-// function evaluateDebitNoteJson(debitNoteJson){
-
-//     let debitNoteJsonReader = debitNoteJson['DebitNote'];
-
-
-//     let invoiceNumber = debitNoteJsonReader?.['cbc:ID'];
-
-//     let description = '';
-
-//     if (Array.isArray(debitNoteJsonReader?.['cac:DebitNoteLine'])) {
-//         description = debitNoteJsonReader?.['cac:DebitNoteLine'].map(invoiceLine => {
-//             const description = invoiceLine['cac:Item']['cbc:Description'];
-//             // If description is an array, join its elements into one string
-//             if (Array.isArray(description)) {
-//                 return description.join(' ');
-//             } else {
-//                 return description;
-//             }
-//         }).join(' ');        
-//     } else {
-//         let isArrayElement  = Array.isArray(debitNoteJsonReader?.['cac:DebitNoteLine']?.['cac:Item']?.['cbc:Description']);
-//         if (isArrayElement)
-//             description = debitNoteJsonReader?.['cac:DebitNoteLine']?.['cac:Item']?.['cbc:Description'].join(' ');
-//         else
-//             description = debitNoteJsonReader?.['cac:DebitNoteLine']?.['cac:Item']?.['cbc:Description'];
-//     }
-
-//     let rucEmi = debitNoteJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
-//     let amountNoTax = debitNoteJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
-
-//     let currencyCode = "";
-
-//     // If currency code is a direct value
-//     if (debitNoteJsonReader.hasOwnProperty('DocumentCurrencyCode')) {
-//         currencyCode = debitNoteJsonReader.DocumentCurrencyCode;
-//     }
-//     // If currency code is nested within an object
-//     else if (debitNoteJsonReader.hasOwnProperty('cbc:DocumentCurrencyCode') && typeof debitNoteJsonReader['cbc:DocumentCurrencyCode'] === 'object') {
-//         currencyCode = debitNoteJsonReader['cbc:DocumentCurrencyCode']['_'];
-//     }
-//     // If currency code is nested within an object with multiple attributes
-//     else if (debitNoteJsonReader.hasOwnProperty('cbc:DocumentCurrencyCode') && typeof debitNoteJsonReader['cbc:DocumentCurrencyCode'] === 'string') {
-//         currencyCode = debitNoteJsonReader['cbc:DocumentCurrencyCode'];
-//     }    
-    
-//     let issueDate = findValue(debitNoteJsonReader, equivalenceDict['cbc:IssueDate']);
-    
-    
-
-//     return {
-//         invoiceNumber,
-//         description,
-//         rucEmi,
-//         amountNoTax,
-//         currencyCode,
-//         issueDate
-//       };
-
-// }
-
-// // Function to read and convert all XML files in the folder, then write to Excel
-// const processXmlFiles = async () => {
-//   const workbook = xlsx.utils.book_new();
-//   const worksheetData = [['File', 'Invoice', 'Description', 'Ruc Emisor', 'Amount no tax', 'Currency Code', 'Issue Date']];
-
-//   try {
-//     const files = fs.readdirSync(xmlFolder);
-//     for (const file of files) {
-//       if (path.extname(file) === '.xml') {
-//         const filePath = path.join(xmlFolder, file);
-//         const xmlData = fs.readFileSync(filePath, 'utf8');
-//         const jsonData = await convertXmlToJson(xmlData);
-
-//         // console.log("%j", jsonData);
-//         // console.log("----");
-//         // console.log("--------");
-//         // console.log("------------");
-        
-        
-
-//         const values = extractValues(jsonData);
-//         // console.log(values);
-        
-//         worksheetData.push([file, values.invoiceNumber, values.description, values.rucEmi, values.amountNoTax, values.currencyCode, values.issueDate]);
-
-//         console.log(`Processed file: ${file}`);
-//       }
-//     }
-
-//     const worksheet = xlsx.utils.aoa_to_sheet(worksheetData);
-//     xlsx.utils.book_append_sheet(workbook, worksheet, 'Sheet1');
-//     xlsx.writeFile(workbook, outputExcelFile);
-
-//     console.log(`Data has been written to ${outputExcelFile}`);
-//   } catch (error) {
-//     console.error('Error processing XML files:', error);
-//   }
-// };
-
-// // Execute the function
-// processXmlFiles();
