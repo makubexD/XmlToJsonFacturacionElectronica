@@ -82,13 +82,164 @@ const findValue = (obj, keys) => {
   return 'Not found';
 };
 
+
+// function findValueByPath(json, path) {
+//   const keys = path.split('.'); // Split the path into keys
+//   let current = json; // Start from the root of the JSON
+
+//   for (const key of keys) {
+//       // If current is an array, we need to search through its items
+//       if (Array.isArray(current)) {
+//           // Create an array to hold found results
+//           let results = [];
+//           for (const item of current) {
+//               // Recursively search in each item
+//               const result = findValueByPath(item, key);
+//               if (result !== undefined) {
+//                   results.push(result); // Collect found values
+//               }
+//           }
+//           if (results.length > 0) {
+//               current = results; // If we found results, continue with them
+//           } else {
+//               return undefined; // No values found
+//           }
+//       } else if (typeof current === 'object' && current !== null && key in current) {
+//           // If the current level is an object, move deeper
+//           current = current[key];
+//       } else {
+//           // Key not found, return undefined
+//           return undefined;
+//       }
+//   }
+
+//   // After navigating through the path, return the final value
+//   // If the final value is an array, return its first element
+//   if (Array.isArray(current)) {
+//       return current[0]; // Return the first element of the array
+//   }
+
+//   // If it's an object with an underscore property, return that value
+//   if (typeof current === 'object' && current !== null && '_' in current) {
+//       return current._; // Return the value of the underscore property
+//   }
+
+//   // Return the final value
+//   return current;
+// }
+
+/*
+
+v2 working*/
+
+function findValueByPath(json, path) {
+  const keys = path.split('.'); // Split the path into keys
+  let current = json; // Start from the root of the JSON
+
+  for (const key of keys) {
+      // If current is an array, we need to search through its items
+      if (Array.isArray(current)) {
+          let results = [];
+          for (const item of current) {
+              // Recursively search in each item
+              const result = findValueByPath(item, key);
+              if (result !== undefined) {
+                  results.push(result); // Collect found values
+              }
+          }
+          if (results.length > 0) {
+              current = results; // If we found results, continue with them
+          } else {
+              return undefined; // No values found
+          }
+      } else if (typeof current === 'object' && current !== null) {
+          // Check for the key directly
+          if (key in current) {
+              current = current[key];
+          } 
+          // If not found, check for the key with an underscore
+          else if (`_${key}` in current) {
+              current = current[`_${key}`];
+          } else {
+              // Key not found, return undefined
+              return undefined;
+          }
+      } else {
+          // Not an object or array, return undefined
+          return undefined;
+      }
+  }
+
+  // After navigating through the path, handle the final value
+  if (Array.isArray(current)) {
+      if (current.length === 0) return undefined; // Return undefined if empty array
+      const firstElement = current[0];
+      // Check if the first element is an object with an underscore property
+      if (typeof firstElement === 'object' && firstElement !== null) {
+          return firstElement._ !== undefined ? firstElement._ : firstElement; // Return underscore property or the object itself
+      }
+      return firstElement; // Return the first element directly
+  }
+
+  // If current is an object, check for an underscore property
+  if (typeof current === 'object' && current !== null && '_' in current) {
+      return current._; // Return the value of the underscore property
+  }
+
+  // Return the final value directly if it's not an array or object with underscore
+  return current;
+}
+
+
+/*
+Version Working final description concat
+*/
+
+
+
+//function findValueByPathLastNodeMerge(json, path, mergeLastNode = false) {
+  function getValueFromPath(json, path) {
+    // Split the path by "." to create an array of keys
+    const keys = path.split('.');
+  
+    let current = json;
+  
+    // Traverse the JSON object based on the keys array
+    for (let key of keys) {
+      if (Array.isArray(current)) {
+        // If it's an array, map and extract values for the given key
+        current = current.map(item => item[key]).flat().filter(Boolean);
+      } else {
+        current = current[key] || [];
+      }
+    }
+  
+    // If the final value is still an array, join the string elements
+    return Array.isArray(current)
+      ? current.map(value => (typeof value === 'string' ? value : '')).join(' ')
+      : current;
+  }
+  
+  
+  
+  
+
+
+
+
+
+
+
 const processXmlFile = async (filePath, tokenManager) => {
   const fileName = path.basename(filePath);
   const invoiceData = new InvoiceData('XML', fileName);
 
   try {
     const xmlData = fs.readFileSync(filePath, 'utf8');
-    const jsonData = await convertXmlToJson(xmlData);
+    const parser = new xml2js.Parser();
+    // const jsonData = await convertXmlToJson(xmlData);
+    const jsonData = await parser.parseStringPromise(xmlData); // This will throw an error if the XML is invalid
+
     const values = extractValues(jsonData, invoiceData);  // Pass invoiceData for error handling
 
     if (values.rucEmi && values.rucEmi.length == 11){
@@ -113,16 +264,22 @@ const extractValues = (jsonData, invoiceData) => {
 
     switch (identifier) {
       case 'Invoice':
-        values = evaluateInvoiceJson(jsonData);
+        values = evaluateInvoiceJson(jsonData, identifier);
         break;
       case 'ar:ApplicationResponse':
-        values = evaluateApplicationResponseJson(jsonData);
+        values = evaluateArApplicationResponseJson(jsonData, identifier);
+        break;
+      case 'ApplicationResponse':
+        values = evaluateApplicationResponseJson(jsonData, identifier);
         break;
       case 'DebitNote':
-        values = evaluateDebitNoteJson(jsonData);
+        values = evaluateDebitNoteJson(jsonData, identifier);
+        break;
+      case 'PPLDocument':
+        values = evaluatePPLDocumentJson(jsonData, identifier);
         break;
       default:
-        throw new Error(`Unknown JSON identifier: ${identifier}`);
+        throw new Error(`The XML has not defined structure : ${identifier}`);
     }    
 
     return values;
@@ -135,46 +292,91 @@ const extractValues = (jsonData, invoiceData) => {
 
 
 
-function evaluateInvoiceJson(invoiceJson) {
-  let invoiceJsonReader = invoiceJson['Invoice'];
+function evaluateInvoiceJson(invoiceJson, identifier) {
+  let invoiceJsonReader = invoiceJson[identifier];
 
-  let invoiceNumber = invoiceJsonReader?.['cbc:ID'];
-  let description = '';
+  // console.dir(invoiceJsonReader, {depth:null});
+  
 
-  if (Array.isArray(invoiceJsonReader?.['cac:InvoiceLine'])) {
-    description = invoiceJsonReader?.['cac:InvoiceLine'].map(invoiceLine => {
-      const description = invoiceLine['cac:Item']['cbc:Description'];
-      return Array.isArray(description) ? description.join(' ') : description;
-    }).join(' ');
-  } else {
-    description = invoiceJsonReader?.['cac:InvoiceLine']?.['cac:Item']?.['cbc:Description'];
-  }
+  let invoiceNumber = findValueByPath(invoiceJsonReader, 'cbc:ID');//invoiceJsonReader?.['cbc:ID'];    
+  let description = getValueFromPath(invoiceJsonReader, 'cac:InvoiceLine.cac:Item.cbc:Description');  
+  let rucEmi = findValueByPath(invoiceJsonReader, 'cac:AccountingSupplierParty.cac:Party.cac:PartyIdentification.cbc:ID'); //invoiceJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
+  let amountNoTax = findValueByPath(invoiceJsonReader, 'cac:TaxTotal.cac:TaxSubtotal.cbc:TaxableAmount'); //invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
+  let currencyCode = findValueByPath(invoiceJsonReader, 'cbc:DocumentCurrencyCode'); //invoiceJsonReader['cbc:DocumentCurrencyCode']?.['_'] || invoiceJsonReader['cbc:DocumentCurrencyCode'] || '';
+  let issueDate = findValueByPath(invoiceJsonReader, 'cbc:IssueDate') //findValue(invoiceJsonReader, equivalenceDict['cbc:IssueDate']);
 
-  let rucEmi = invoiceJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
-  let amountNoTax = invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
-  let currencyCode = invoiceJsonReader['cbc:DocumentCurrencyCode']?.['_'] || invoiceJsonReader['cbc:DocumentCurrencyCode'] || '';
-  let issueDate = findValue(invoiceJsonReader, equivalenceDict['cbc:IssueDate']);
+  
+  // let description = ''
+  // if (Array.isArray(invoiceJsonReader?.['cac:InvoiceLine'])) {
+  //   description = invoiceJsonReader?.['cac:InvoiceLine'].map(invoiceLine => {
+  //     const description = invoiceLine['cac:Item']['cbc:Description'];
+  //     return Array.isArray(description) ? description.join(' ') : description;
+  //   }).join(' ');
+  // } else {
+  //   description = invoiceJsonReader?.['cac:InvoiceLine']?.['cac:Item']?.['cbc:Description'];
+  // }
+
+  
+
+ 
+  
+  // console.log(invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']);
+
+  // let amountNoTax = '';
+  // let taxSubtotalMain = invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal'];
+  // if (Array.isArray(taxSubtotalMain)) {    
+  //   amountNoTax = taxSubtotalMain.map(item => {
+  //     const taxableAmount = item?.['cbc:TaxableAmount']?.["_"];
+  //     if (taxableAmount) {
+  //       return taxableAmount;
+  //     }
+  //     return null;
+  //   }).filter(amount => amount !== null);
+  // } else if (taxSubtotalMain) {    
+  //   const amountNoTaxValid = taxSubtotalMain?.['cbc:TaxableAmount']?.["_"];
+  //   amountNoTax = amountNoTaxValid ? amountNoTaxValid : null; 
+  // }
+
+  
+  // let taxSubtotalMain = invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal'];
+
+  // if (Array.isArray(taxSubtotalMain)) {
+  //   // Use reduce to return the first valid float and stop the reduce
+  //   amountNoTax = taxSubtotalMain.reduce((acc, item) => {
+  //     if (acc) return acc; // If already found, skip
+  //     const taxableAmount = item?.['cbc:TaxableAmount']?.["_"];
+  //     return taxableAmount && !isNaN(parseFloat(taxableAmount)) ? taxableAmount : null;
+  //   }, null);
+  // } else if (taxSubtotalMain) {    
+  //   const amountNoTaxValid = taxSubtotalMain?.['cbc:TaxableAmount']?.["_"];
+  //   amountNoTax = amountNoTaxValid && !isNaN(parseFloat(amountNoTaxValid)) ? amountNoTaxValid : null;
+  // }
+  
+  
+  // let amountNoTax = invoiceJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
+  
+  
 
   return {
     invoiceNumber,
     description,
     rucEmi,
-    amountNoTax,
+    amountNoTax : (amountNoTax || '').toString(),
     currencyCode,
     issueDate,
     StackError: ''
   };
 }
 
-function evaluateApplicationResponseJson(appRespJson) {
-  let appRespJsonReader = appRespJson['ar:ApplicationResponse'];
+function evaluateArApplicationResponseJson(appRespJson, identifier) {
+  let appRespJsonReader = appRespJson[identifier];
 
-  let invoiceNumber = findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:DocumentReference'], equivalenceDict['cbc:ID']);
-  let description = findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:Response'], equivalenceDict['cbc:Description']);
+  let invoiceNumber = findValueByPath(appRespJsonReader, 'cac:DocumentResponse.cac:DocumentReference.cbc:ID');//findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:DocumentReference'], equivalenceDict['cbc:ID']);
+  let description = findValueByPath(appRespJsonReader, 'cac:DocumentResponse.cac:Response.cbc:Description');//findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:Response'], equivalenceDict['cbc:Description']);
   let rucEmi = 'TBD';
   let amountNoTax = 'TBD';
-  let currencyCode = findValue(appRespJsonReader, equivalenceDict['cbc:DocumentCurrencyCode']);
-  let issueDate = findValue(appRespJsonReader, equivalenceDict['cbc:IssueDate']);
+  let currencyCode = findValueByPath(appRespJsonReader, 'cbc:DocumentCurrencyCode');//findValue(appRespJsonReader, equivalenceDict['cbc:DocumentCurrencyCode']);
+  let issueDate = findValueByPath(appRespJsonReader, 'cbc:IssueDate');//findValue(appRespJsonReader, equivalenceDict['cbc:IssueDate']);
 
   return {
     invoiceNumber,
@@ -187,25 +389,81 @@ function evaluateApplicationResponseJson(appRespJson) {
   };
 }
 
-function evaluateDebitNoteJson(debitNoteJson) {
-  let debitNoteJsonReader = debitNoteJson['DebitNote'];
+function evaluateApplicationResponseJson(appRespJson, identifier) {
+  let appRespJsonReader = appRespJson[identifier];
 
-  let invoiceNumber = debitNoteJsonReader?.['cbc:ID'];
-  let description = '';
+  let invoiceNumber = findValueByPath(appRespJsonReader, 'cac:DocumentResponse.cac:DocumentReference.cbc:ID');//findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:DocumentReference'], equivalenceDict['cbc:ID']);
+  let description = findValueByPath(appRespJsonReader, 'cac:DocumentResponse.cac:Response.cbc:Description');//findValue(appRespJsonReader?.['cac:DocumentResponse']?.['cac:Response'], equivalenceDict['cbc:Description']);
+  let rucEmi = 'TBD';
+  let amountNoTax = 'TBD';
+  let currencyCode = findValueByPath(appRespJsonReader, 'cbc:DocumentCurrencyCode');//findValue(appRespJsonReader, equivalenceDict['cbc:DocumentCurrencyCode']);
+  let issueDate = findValueByPath(appRespJsonReader, 'cbc:IssueDate');//findValue(appRespJsonReader, equivalenceDict['cbc:IssueDate']);
 
-  if (Array.isArray(debitNoteJsonReader?.['cac:DebitNoteLine'])) {
-    description = debitNoteJsonReader?.['cac:DebitNoteLine'].map(invoiceLine => {
-      const description = invoiceLine['cac:Item']['cbc:Description'];
-      return Array.isArray(description) ? description.join(' ') : description;
-    }).join(' ');
-  } else {
-    description = debitNoteJsonReader?.['cac:DebitNoteLine']?.['cac:Item']?.['cbc:Description'];
-  }
+  return {
+    invoiceNumber,
+    description,
+    rucEmi,
+    amountNoTax,
+    currencyCode,
+    issueDate,
+    StackError: ''
+  };
+}
 
-  let rucEmi = debitNoteJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
-  let amountNoTax = debitNoteJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
-  let currencyCode = debitNoteJsonReader['cbc:DocumentCurrencyCode']?.['_'] || debitNoteJsonReader['cbc:DocumentCurrencyCode'] || '';
-  let issueDate = findValue(debitNoteJsonReader, equivalenceDict['cbc:IssueDate']);
+function evaluateDebitNoteJson(debitNoteJson, identifier) {
+  let debitNoteJsonReader = debitNoteJson[identifier];
+
+  let invoiceNumber = findValueByPath(debitNoteJsonReader, 'cbc:ID'); //debitNoteJsonReader?.['cbc:ID'];
+  let description = findValueByPath(invoiceJsonReader, 'cac:DebitNoteLine.cac:Item.cbc:Description');
+  
+
+  // if (Array.isArray(debitNoteJsonReader?.['cac:DebitNoteLine'])) {
+  //   description = debitNoteJsonReader?.['cac:DebitNoteLine'].map(invoiceLine => {
+  //     const description = invoiceLine['cac:Item']['cbc:Description'];
+  //     return Array.isArray(description) ? description.join(' ') : description;
+  //   }).join(' ');
+  // } else {
+  //   description = debitNoteJsonReader?.['cac:DebitNoteLine']?.['cac:Item']?.['cbc:Description'];
+  // }
+
+  // let rucEmi = debitNoteJsonReader?.['cac:AccountingSupplierParty']?.['cac:Party']?.['cac:PartyIdentification']?.['cbc:ID']["_"];
+  // let amountNoTax = debitNoteJsonReader?.['cac:TaxTotal']?.['cac:TaxSubtotal']?.['cbc:TaxableAmount']["_"];
+  // let currencyCode = debitNoteJsonReader['cbc:DocumentCurrencyCode']?.['_'] || debitNoteJsonReader['cbc:DocumentCurrencyCode'] || '';
+  // let issueDate = findValue(debitNoteJsonReader, equivalenceDict['cbc:IssueDate']);
+
+  let rucEmi = findValueByPath(invoiceJsonReader,'cac:AccountingSupplierParty.cac:Party.cac:PartyIdentification.cbc:ID')
+  let amountNoTax = findValueByPath(invoiceJsonReader,'cac:TaxTotal.cac:TaxSubtotal.cbc:TaxableAmount')
+  let currencyCode = findValueByPath(invoiceJsonReader,'cbc:DocumentCurrencyCode')
+  let issueDate = findValueByPath(invoiceJsonReader,'cbc:IssueDate')
+
+
+
+  return {
+    invoiceNumber,
+    description,
+    rucEmi,
+    amountNoTax,
+    currencyCode,
+    issueDate,
+    StackError: ''
+  };
+}
+
+
+function evaluatePPLDocumentJson(pplDocumentJson, identifier) {
+  let debitNoteJsonReader = pplDocumentJson[identifier];
+
+  // console.dir(debitNoteJsonReader, {depth:null});
+
+  const mainPath = 'ClientDocument.Invoice.';
+
+  let invoiceNumber = findValueByPath(debitNoteJsonReader, `${mainPath}cbc:ID`);
+  let description = findValueByPath(debitNoteJsonReader, `${mainPath}cac:InvoiceLine.cac:Item.cbc:Description`);
+  let rucEmi = findValueByPath(debitNoteJsonReader, `${mainPath}cac:Signature.cac:SignatoryParty.cac:PartyIdentification.cbc:ID`);
+  let amountNoTax = findValueByPath(debitNoteJsonReader, `${mainPath}cac:TaxTotal.cac:TaxSubtotal.cbc:TaxableAmount`);
+  let currencyCode = findValueByPath(debitNoteJsonReader, `${mainPath}cbc:DocumentCurrencyCode`);
+  let issueDate = findValueByPath(debitNoteJsonReader, `${mainPath}cbc:IssueDate`);
+
 
   return {
     invoiceNumber,
