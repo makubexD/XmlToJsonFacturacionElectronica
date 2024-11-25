@@ -275,6 +275,9 @@ const extractValues = (jsonData, invoiceData) => {
       case 'DebitNote':
         values = evaluateDebitNoteJson(jsonData, identifier);
         break;
+      case 'CreditNote':
+        values = evaluateCreditNoteJson(jsonData, identifier);
+        break;
       case 'PPLDocument':
         values = evaluatePPLDocumentJson(jsonData, identifier);
         break;
@@ -414,7 +417,7 @@ function evaluateDebitNoteJson(debitNoteJson, identifier) {
   let debitNoteJsonReader = debitNoteJson[identifier];
 
   let invoiceNumber = findValueByPath(debitNoteJsonReader, 'cbc:ID'); //debitNoteJsonReader?.['cbc:ID'];
-  let description = findValueByPath(invoiceJsonReader, 'cac:DebitNoteLine.cac:Item.cbc:Description');
+  let description = findValueByPath(debitNoteJsonReader, 'cac:DebitNoteLine.cac:Item.cbc:Description');
   
 
   // if (Array.isArray(debitNoteJsonReader?.['cac:DebitNoteLine'])) {
@@ -431,10 +434,34 @@ function evaluateDebitNoteJson(debitNoteJson, identifier) {
   // let currencyCode = debitNoteJsonReader['cbc:DocumentCurrencyCode']?.['_'] || debitNoteJsonReader['cbc:DocumentCurrencyCode'] || '';
   // let issueDate = findValue(debitNoteJsonReader, equivalenceDict['cbc:IssueDate']);
 
-  let rucEmi = findValueByPath(invoiceJsonReader,'cac:AccountingSupplierParty.cac:Party.cac:PartyIdentification.cbc:ID')
-  let amountNoTax = findValueByPath(invoiceJsonReader,'cac:TaxTotal.cac:TaxSubtotal.cbc:TaxableAmount')
-  let currencyCode = findValueByPath(invoiceJsonReader,'cbc:DocumentCurrencyCode')
-  let issueDate = findValueByPath(invoiceJsonReader,'cbc:IssueDate')
+  let rucEmi = findValueByPath(debitNoteJsonReader,'cac:AccountingSupplierParty.cac:Party.cac:PartyIdentification.cbc:ID') || findValueByPath(debitNoteJsonReader,'cac:Signature.SignatureParty.cac:PartyIdentification.cbc:ID')
+  let amountNoTax = findValueByPath(debitNoteJsonReader,'cac:TaxTotal.cac:TaxSubtotal.cbc:TaxableAmount')
+  let currencyCode = findValueByPath(debitNoteJsonReader,'cbc:DocumentCurrencyCode')
+  let issueDate = findValueByPath(debitNoteJsonReader,'cbc:IssueDate') || findValueByPath(debitNoteJsonReader,'cac:BillingReference.cac:InvoiceDocumentReference.cbc:IssueDate')
+
+
+
+  return {
+    invoiceNumber,
+    description,
+    rucEmi,
+    amountNoTax,
+    currencyCode,
+    issueDate,
+    StackError: ''
+  };
+}
+
+function evaluateCreditNoteJson(debitNoteJson, identifier) {
+  let creditNoteJsonReader = debitNoteJson[identifier];
+
+  let invoiceNumber = findValueByPath(creditNoteJsonReader, 'cbc:ID'); //debitNoteJsonReader?.['cbc:ID'];
+  let description = getValueFromPath(creditNoteJsonReader, 'cac:CreditNoteLine.cac:Item.cbc:Description');  
+  
+  let rucEmi = findValueByPath(creditNoteJsonReader,'cac:Signature.cac:SignatoryParty.cac:PartyIdentification.cbc:ID')
+  let amountNoTax = findValueByPath(creditNoteJsonReader,'cac:TaxTotal.cac:TaxSubtotal.cbc:TaxableAmount')
+  let currencyCode = findValueByPath(creditNoteJsonReader,'cbc:DocumentCurrencyCode')
+  let issueDate = findValueByPath(creditNoteJsonReader,'cac:BillingReference.cac:InvoiceDocumentReference.cbc:IssueDate')
 
 
 
